@@ -1,132 +1,342 @@
-# ==========================================
-# Live Revenue Pulse Dashboard (Streamlit)
-# ==========================================
-
 import streamlit as st
 import pandas as pd
+import numpy as np
 import random
 import time
-from datetime import datetime
 import requests
 import plotly.express as px
-from streamlit_autorefresh import st_autorefresh
+from datetime import datetime
+import sqlite3
+from passlib.hash import pbkdf2_sha256
 
-# ================================
-# CONFIG
-# ================================
-API_KEY = "YOUR_OPENWEATHER_API_KEY"  # <-- Replace this
-REFRESH_INTERVAL = 30 * 1000  # 30 seconds
+# -----------------------------
+# PAGE CONFIG
+# -----------------------------
 
-# ================================
-# AUTO REFRESH
-# ================================
-st_autorefresh(interval=REFRESH_INTERVAL, key="data_refresh")
-
-st.set_page_config(page_title="Live Revenue Pulse", layout="wide")
-
-st.title("📊 Live Revenue Pulse Dashboard")
-
-# ================================
-# SAMPLE DATA STORAGE
-# ================================
-if "sales_data" not in st.session_state:
-    st.session_state.sales_data = pd.DataFrame(columns=["Time", "Product", "Price", "City"])
-
-# ================================
-# FAKE DATA GENERATION
-# ================================
-products = ["Laptop", "Phone", "Tablet", "Headphones", "Camera"]
-cities = ["Chennai", "Mumbai", "Delhi", "Bangalore", "Hyderabad"]
-
-def generate_fake_sale():
-    return {
-        "Time": datetime.now(),
-        "Product": random.choice(products),
-        "Price": random.randint(5000, 50000),
-        "City": random.choice(cities)
-    }
-
-# Add new sale every refresh
-new_sale = generate_fake_sale()
-st.session_state.sales_data = pd.concat(
-    [st.session_state.sales_data, pd.DataFrame([new_sale])],
-    ignore_index=True
+st.set_page_config(
+    page_title="Enterprise Command Center",
+    layout="wide",
+    page_icon="🚀"
 )
 
-df = st.session_state.sales_data
+# -----------------------------
+# DATABASE
+# -----------------------------
 
-# ================================
-# METRICS (Day 2)
-# ================================
-total_revenue = df["Price"].sum()
-total_orders = len(df)
+conn = sqlite3.connect("command_center.db", check_same_thread=False)
+cursor = conn.cursor()
 
-col1, col2 = st.columns(2)
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users(
+username TEXT,
+password TEXT,
+role TEXT
+)
+""")
 
-col1.metric("💰 Total Revenue", f"₹{total_revenue:,}")
-col2.metric("📦 Total Orders", total_orders)
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS sales(
+time TEXT,
+product TEXT,
+price INTEGER,
+city TEXT,
+weather TEXT
+)
+""")
 
-# ================================
-# SALES CHART
-# ================================
-st.subheader("📈 Sales by City")
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS hospital(
+time TEXT,
+patientid INTEGER,
+triage INTEGER,
+wait INTEGER,
+department TEXT
+)
+""")
 
-city_sales = df.groupby("City")["Price"].sum().reset_index()
+conn.commit()
 
-fig = px.bar(city_sales, x="City", y="Price", title="Revenue by City")
-st.plotly_chart(fig, use_container_width=True)
+# -----------------------------
+# DEFAULT USERS
+# -----------------------------
 
-# ================================
-# WEATHER FUNCTION (Day 3)
-# ================================
-def get_weather(city):
-    try:
-        url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={API_KEY}&units=metric"
-        response = requests.get(url)
-        data = response.json()
+def create_default_users():
 
-        weather_main = data["weather"][0]["main"]
-        temp = data["main"]["temp"]
+    users = cursor.execute("SELECT * FROM users").fetchall()
 
-        if weather_main.lower() == "rain":
-            impact = "🌧️ Rain affecting sales"
-        elif temp > 35:
-            impact = "🔥 Heat affecting sales"
+    if len(users) == 0:
+
+        cursor.execute(
+            "INSERT INTO users VALUES (?,?,?)",
+            ("admin", pbkdf2_sha256.hash("admin123"), "Admin")
+        )
+
+        cursor.execute(
+            "INSERT INTO users VALUES (?,?,?)",
+            ("manager", pbkdf2_sha256.hash("manager123"), "Manager")
+        )
+
+        cursor.execute(
+            "INSERT INTO users VALUES (?,?,?)",
+            ("doctor", pbkdf2_sha256.hash("doctor123"), "Doctor")
+        )
+
+        conn.commit()
+
+create_default_users()
+
+# -----------------------------
+# LOGIN
+# -----------------------------
+
+if "login" not in st.session_state:
+    st.session_state.login = False
+
+if not st.session_state.login:
+
+    st.title("🔐 Enterprise Command Center Login")
+
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+
+    if st.button("Login"):
+
+        user = cursor.execute(
+            "SELECT * FROM users WHERE username=?",
+            (username,)
+        ).fetchone()
+
+        if user and pbkdf2_sha256.verify(password, user[1]):
+
+            st.session_state.login = True
+            st.session_state.role = user[2]
+            st.session_state.user = username
+
+            st.rerun()
+
         else:
-            impact = "✅ Normal conditions"
+            st.error("Invalid Login")
 
-        return weather_main, temp, impact
+    st.stop()
+
+# -----------------------------
+# SIDEBAR
+# -----------------------------
+
+st.sidebar.title("Command Center")
+
+st.sidebar.write(f"User: {st.session_state.user}")
+st.sidebar.write(f"Role: {st.session_state.role}")
+
+dashboard = st.sidebar.selectbox(
+    "Select Dashboard",
+    ["Live Revenue", "Hospital ER"]
+)
+
+refresh = st.sidebar.slider("Refresh Seconds", 5, 60, 10)
+
+# -----------------------------
+# WEATHER API
+# -----------------------------
+
+def get_weather(city):
+
+    try:
+        api = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid=YOUR_API_KEY"
+        r = requests.get(api).json()
+        return r["weather"][0]["main"]
 
     except:
-        return "N/A", "N/A", "Weather unavailable"
+        return "Clear"
 
-# ================================
-# WEATHER DISPLAY
-# ================================
-st.subheader("🌦️ Weather Impact on Sales")
+# -----------------------------
+# DATA GENERATORS
+# -----------------------------
 
-weather_data = []
+products = [
+    "Laptop","Mobile","Tablet",
+    "Camera","Headphones","Watch"
+]
 
-for city in cities:
-    weather, temp, impact = get_weather(city)
-    weather_data.append({
-        "City": city,
-        "Weather": weather,
-        "Temperature (°C)": temp,
-        "Impact": impact
-    })
+cities = [
+    "Chennai","Mumbai",
+    "Delhi","Bangalore",
+    "Hyderabad"
+]
 
-weather_df = pd.DataFrame(weather_data)
+departments = [
+    "Emergency",
+    "Cardiology",
+    "Orthopedic",
+    "Neurology",
+    "General"
+]
 
-st.dataframe(weather_df, use_container_width=True)
+def generate_sale():
 
-# ================================
-# LIVE TABLE
-# ================================
-st.subheader("🧾 Live Sales Feed")
-st.dataframe(df.tail(10), use_container_width=True)
+    city = random.choice(cities)
 
-# ================================
-# FOOTER
-# ================================
-st.caption("Auto-refresh every 30 seconds ⏳")
+    return (
+        datetime.now(),
+        random.choice(products),
+        random.randint(2000,50000),
+        city,
+        get_weather(city)
+    )
+
+
+def generate_patient():
+
+    return (
+        datetime.now(),
+        random.randint(1000,9999),
+        random.randint(1,5),
+        random.randint(5,120),
+        random.choice(departments)
+    )
+
+# -----------------------------
+# SALES DASHBOARD
+# -----------------------------
+
+if dashboard == "Live Revenue":
+
+    st.title("📈 Live Revenue Command Center")
+
+    new_sale = generate_sale()
+
+    cursor.execute(
+        "INSERT INTO sales VALUES (?,?,?,?,?)",
+        new_sale
+    )
+
+    conn.commit()
+
+    df = pd.read_sql("SELECT * FROM sales", conn)
+
+    col1,col2,col3,col4 = st.columns(4)
+
+    col1.metric("Total Revenue", f"₹{df['price'].sum():,}")
+    col2.metric("Orders", len(df))
+    col3.metric("Avg Order", int(df["price"].mean()))
+    col4.metric("Cities", df["city"].nunique())
+
+    st.divider()
+
+    col5,col6 = st.columns(2)
+
+    with col5:
+        fig = px.bar(
+            df,
+            x="city",
+            y="price",
+            title="City Revenue"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col6:
+        fig = px.pie(
+            df,
+            names="product",
+            title="Product Mix"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    weather = df["weather"].value_counts().idxmax()
+
+    if weather == "Rain":
+        st.warning("Rain Impact Sales")
+
+    if weather == "Heat":
+        st.error("Heat Surge")
+
+    st.subheader("Live Feed")
+    st.dataframe(df.tail(15))
+
+# -----------------------------
+# HOSPITAL DASHBOARD
+# -----------------------------
+
+if dashboard == "Hospital ER":
+
+    st.title("🏥 Emergency Command Center")
+
+    new_patient = generate_patient()
+
+    cursor.execute(
+        "INSERT INTO hospital VALUES (?,?,?,?,?)",
+        new_patient
+    )
+
+    conn.commit()
+
+    df = pd.read_sql("SELECT * FROM hospital", conn)
+
+    col1,col2,col3,col4 = st.columns(4)
+
+    col1.metric("ER Load", len(df))
+    col2.metric("Avg Wait", int(df["wait"].mean()))
+    col3.metric("Critical", len(df[df["triage"]==1]))
+    col4.metric("Departments", df["department"].nunique())
+
+    if len(df[df["triage"]==1]) > 3:
+        st.error("CRITICAL SURGE")
+
+    st.divider()
+
+    col5,col6 = st.columns(2)
+
+    with col5:
+        fig = px.bar(
+            df,
+            x="department",
+            y="wait",
+            title="Department Load"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col6:
+        fig = px.histogram(
+            df,
+            x="triage",
+            title="Triage Distribution"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    st.subheader("Live Patient Feed")
+    st.dataframe(df.tail(15))
+
+# -----------------------------
+# POWER BI EXPORT
+# -----------------------------
+
+st.sidebar.divider()
+
+if st.sidebar.button("Export Sales CSV"):
+    df = pd.read_sql("SELECT * FROM sales", conn)
+    df.to_csv("sales_export.csv", index=False)
+    st.sidebar.success("Exported")
+
+if st.sidebar.button("Export Hospital CSV"):
+    df = pd.read_sql("SELECT * FROM hospital", conn)
+    df.to_csv("hospital_export.csv", index=False)
+    st.sidebar.success("Exported")
+
+# -----------------------------
+# LOGOUT
+# -----------------------------
+
+if st.sidebar.button("Logout"):
+    st.session_state.login = False
+    st.rerun()
+
+# -----------------------------
+# AUTO REFRESH
+# -----------------------------
+
+time.sleep(refresh)
+st.rerun()
